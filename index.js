@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { readFileSync, unlinkSync, existsSync } from "fs";
+import { readFileSync, unlinkSync, existsSync, readdirSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import os from "os";
@@ -20,8 +20,6 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 function extractVideoId(url) {
   if (!url) return null;
-
-  // Já é um ID (11 caracteres alfanuméricos + _ e -)
   if (/^[a-zA-Z0-9_-]{11}$/.test(url)) return url;
 
   const patterns = [
@@ -36,16 +34,47 @@ function extractVideoId(url) {
     const match = url.match(pattern);
     if (match) return match[1];
   }
-
   return null;
 }
 
-function formatTimestamp(seconds) {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
+function formatTimestamp(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// Parse formato JSON3 do yt-dlp — formato mais limpo, sem duplicatas
+function parseJson3(content) {
+  const data = JSON.parse(content);
+  const events = data.events || [];
+  const segments = [];
+
+  for (const ev of events) {
+    const segs = ev.segs;
+    if (!segs) continue;
+    const text = segs.map(s => s.utf8 || "").join("").trim();
+    if (!text || text === "\n") continue;
+    segments.push({ startMs: ev.tStartMs || 0, text });
+  }
+
+  return segments;
+}
+
+async function checkYtdlp() {
+  try {
+    await execAsync("python3 -m yt_dlp --version", { timeout: 5000 });
+    return "python3 -m yt_dlp";
+  } catch {
+    try {
+      await execAsync("yt-dlp --version", { timeout: 5000 });
+      return "yt-dlp";
+    } catch {
+      return null;
+    }
+  }
 }
 
 function ok(text) {
@@ -67,7 +96,7 @@ const server = new McpServer({
 
 server.tool(
   "youtube_transcript",
-  "Extrai a transcrição de um vídeo do YouTube usando legendas automáticas (rápido, sem API key). Funciona para vídeos com legendas disponíveis.",
+  "Extrai a transcrição de um vídeo do YouTube usando legendas automáticas via yt-dlp. Funciona para qualquer vídeo público com legendas disponíveis.",
   {
     url: z.string().describe("URL ou ID do vídeo (youtube.com/watch, youtu.be, shorts)"),
     lang: z.string().optional().default("pt").describe("Código de idioma das legendas (padrão: pt, fallback automático: en)"),
@@ -77,87 +106,115 @@ server.tool(
     const videoId = extractVideoId(url);
     if (!videoId) return err(`URL inválida: "${url}". Use um link do YouTube válido ou um ID de 11 caracteres.`);
 
-    let YoutubeTranscript;
-    try {
-      const mod = await import("youtube-transcript");
-      YoutubeTranscript = mod.YoutubeTranscript;
-    } catch {
-      return err('Pacote "youtube-transcript" não instalado. Execute: npm install na pasta do youtube-mcp');
+    const ytdlp = await checkYtdlp();
+    if (!ytdlp) {
+      return err(
+        "yt-dlp não está instalado.\n\n" +
+        "Instale com:\n```\npython3 -m pip install yt-dlp\n```\n" +
+        "ou:\n```\nwinget install yt-dlp\n```"
+      );
     }
 
-    let transcript;
-    let usedLang = lang || "pt";
-    let fallbackUsed = false;
+    const tmpDir = os.tmpdir();
+    const outputBase = join(tmpDir, `yt-sub-${videoId}`);
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
+    // Limpar arquivos anteriores
     try {
-      transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: usedLang });
-    } catch (e1) {
-      // Fallback para inglês se o idioma solicitado não estiver disponível
-      if (usedLang !== "en") {
-        try {
-          usedLang = "en";
-          transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: "en" });
-          fallbackUsed = true;
-        } catch (e2) {
-          // Tenta sem especificar idioma (pega o padrão do vídeo)
-          try {
-            transcript = await YoutubeTranscript.fetchTranscript(videoId);
-            usedLang = "auto";
-            fallbackUsed = true;
-          } catch (e3) {
-            return err(
-              `Não foi possível obter legendas para este vídeo.\n\n` +
-              `Possíveis causas:\n` +
-              `- O vídeo não tem legendas habilitadas\n` +
-              `- O vídeo é privado ou restrito por região\n` +
-              `- O ID/URL está incorreto\n\n` +
-              `Dica: Use youtube_vision para análise via IA mesmo sem legendas.\n\n` +
-              `Erro técnico: ${e3.message}`
-            );
-          }
-        }
-      } else {
-        try {
-          transcript = await YoutubeTranscript.fetchTranscript(videoId);
-          usedLang = "auto";
-          fallbackUsed = true;
-        } catch (e2) {
-          return err(
-            `Não foi possível obter legendas para este vídeo.\n\n` +
-            `Possíveis causas:\n` +
-            `- O vídeo não tem legendas habilitadas\n` +
-            `- O vídeo é privado ou restrito por região\n` +
-            `- O ID/URL está incorreto\n\n` +
-            `Dica: Use youtube_vision para análise via IA mesmo sem legendas.\n\n` +
-            `Erro técnico: ${e2.message}`
-          );
+      for (const f of readdirSync(tmpDir)) {
+        if (f.startsWith(`yt-sub-${videoId}`)) {
+          unlinkSync(join(tmpDir, f));
         }
       }
+    } catch {}
+
+    let usedLang = lang || "pt";
+    let fallbackUsed = false;
+    let subtitleFile = null;
+
+    // Tentar baixar legendas no idioma solicitado (formato json3 para parse limpo)
+    const tryDownload = async (langCode, autoSub) => {
+      const subFlag = autoSub
+        ? `--write-auto-sub --sub-lang "${langCode}"`
+        : `--write-sub --write-auto-sub --sub-lang "${langCode}"`;
+
+      const cmd = `${ytdlp} ${subFlag} --skip-download --sub-format json3 -o "${outputBase}" "${videoUrl}"`;
+      try {
+        await execAsync(cmd, { timeout: 60000 });
+      } catch {
+        // ignorar erros de download parcial
+      }
+
+      // Procurar arquivo de legenda gerado
+      const files = readdirSync(tmpDir).filter(f =>
+        f.startsWith(`yt-sub-${videoId}`) && f.endsWith(".json3")
+      );
+      return files.length > 0 ? join(tmpDir, files[0]) : null;
+    };
+
+    // Tentativa 1: idioma solicitado
+    subtitleFile = await tryDownload(usedLang, false);
+
+    // Tentativa 2: fallback para inglês
+    if (!subtitleFile && usedLang !== "en") {
+      usedLang = "en";
+      fallbackUsed = true;
+      subtitleFile = await tryDownload("en", false);
     }
 
-    if (!transcript || transcript.length === 0) {
-      return err("Transcrição retornada vazia. O vídeo pode não ter legendas.");
+    // Tentativa 3: legenda automática em inglês
+    if (!subtitleFile) {
+      subtitleFile = await tryDownload("en", true);
+    }
+
+    if (!subtitleFile) {
+      return err(
+        `Não foi possível obter legendas para o vídeo ${videoId}.\n\n` +
+        `Possíveis causas:\n` +
+        `- O vídeo não tem legendas habilitadas\n` +
+        `- O vídeo é privado ou restrito por região\n` +
+        `- Idioma "${lang}" não disponível\n\n` +
+        `Dica: Use youtube_info para ver idiomas disponíveis, ou youtube_vision para análise via IA.`
+      );
+    }
+
+    let segments;
+    try {
+      const fileContent = readFileSync(subtitleFile, "utf-8");
+      segments = parseJson3(fileContent);
+    } finally {
+      // Limpar arquivos temporários
+      try {
+        for (const f of readdirSync(tmpDir)) {
+          if (f.startsWith(`yt-sub-${videoId}`)) {
+            unlinkSync(join(tmpDir, f));
+          }
+        }
+      } catch {}
+    }
+
+    if (segments.length === 0) {
+      return err("Arquivo de legendas encontrado mas sem conteúdo de texto. O vídeo pode ter apenas música ou legendas vazias.");
     }
 
     let text;
     if (include_timestamps) {
-      text = transcript
-        .map((item) => `[${formatTimestamp(item.offset / 1000)}] ${item.text}`)
-        .join("\n");
+      text = segments.map(s => `[${formatTimestamp(s.startMs)}] ${s.text}`).join("\n");
     } else {
-      text = transcript.map((item) => item.text).join(" ");
+      text = segments.map(s => s.text).join(" ");
     }
 
-    const wordCount = text.split(/\s+/).length;
-    const durationSec = transcript[transcript.length - 1]?.offset / 1000 || 0;
-    const durationMin = Math.round(durationSec / 60);
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+    const lastMs = segments[segments.length - 1]?.startMs || 0;
+    const durationMin = Math.round(lastMs / 60000);
 
     let output = `# Transcrição do vídeo\n\n`;
     output += `**ID:** ${videoId}\n`;
-    output += `**Idioma usado:** ${usedLang}`;
+    output += `**URL:** https://www.youtube.com/watch?v=${videoId}\n`;
+    output += `**Idioma:** ${usedLang}`;
     if (fallbackUsed) output += ` ⚠️ (fallback — idioma "${lang}" não disponível)`;
     output += `\n`;
-    output += `**Duração aproximada:** ${durationMin} min\n`;
+    output += `**Duração:** ~${durationMin} min\n`;
     output += `**Palavras:** ~${wordCount}\n\n`;
     output += `---\n\n`;
     output += text;
@@ -170,7 +227,7 @@ server.tool(
 
 server.tool(
   "youtube_info",
-  "Retorna informações sobre um vídeo do YouTube: título, canal e idiomas disponíveis para legendas.",
+  "Retorna informações sobre um vídeo do YouTube: título, canal, duração e idiomas disponíveis para legendas.",
   {
     url: z.string().describe("URL ou ID do vídeo do YouTube"),
   },
@@ -178,71 +235,70 @@ server.tool(
     const videoId = extractVideoId(url);
     if (!videoId) return err(`URL inválida: "${url}"`);
 
-    let YoutubeTranscript;
+    let Innertube;
     try {
-      const mod = await import("youtube-transcript");
-      YoutubeTranscript = mod.YoutubeTranscript;
+      const mod = await import("youtubei.js");
+      Innertube = mod.Innertube;
     } catch {
-      return err('Pacote "youtube-transcript" não instalado. Execute: npm install na pasta do youtube-mcp');
+      return err('Pacote "youtubei.js" não instalado. Execute: npm install na pasta do youtube-mcp');
     }
 
     try {
-      // Busca lista de transcrições disponíveis (inclui metadata)
-      const transcripts = await YoutubeTranscript.listTranscripts(videoId);
+      const yt = await Innertube.create({ retrieve_player: false });
+      let info = await yt.getBasicInfo(videoId, "WEB");
+
+      // Retry se captions estiver vazio (pode ser instabilidade de rede)
+      if (!info.captions?.caption_tracks?.length) {
+        await new Promise(r => setTimeout(r, 1000));
+        info = await yt.getBasicInfo(videoId, "WEB");
+      }
+
+      const basic = info.basic_info;
+      // Usar JSON round-trip para garantir array plain JS (youtubei.js usa objetos customizados)
+      const captionsRaw = info.captions ? JSON.parse(JSON.stringify(info.captions)) : {};
+      const tracks = captionsRaw?.caption_tracks || [];
 
       let output = `# Informações do vídeo\n\n`;
       output += `**ID:** ${videoId}\n`;
       output += `**URL:** https://www.youtube.com/watch?v=${videoId}\n\n`;
 
-      if (transcripts.videoDetails) {
-        const d = transcripts.videoDetails;
-        if (d.title) output += `**Título:** ${d.title}\n`;
-        if (d.author) output += `**Canal:** ${d.author}\n`;
-        if (d.lengthSeconds) output += `**Duração:** ${Math.round(d.lengthSeconds / 60)} min\n`;
+      if (basic?.title) output += `**Título:** ${basic.title}\n`;
+      if (basic?.author) output += `**Canal:** ${basic.author}\n`;
+      if (basic?.duration) output += `**Duração:** ${Math.floor(basic.duration / 60)}:${String(basic.duration % 60).padStart(2, "0")} (${basic.duration}s)\n`;
+      if (basic?.view_count) output += `**Visualizações:** ${basic.view_count?.toLocaleString("pt-BR")}\n`;
+      if (basic?.short_description) {
+        const desc = basic.short_description.substring(0, 200);
+        output += `**Descrição:** ${desc}${basic.short_description.length > 200 ? "..." : ""}\n`;
       }
 
-      output += `\n## Legendas disponíveis\n\n`;
-
-      const allTranscripts = [
-        ...(transcripts.manuallyCreated || []),
-        ...(transcripts.generated || []),
-      ];
-
-      if (allTranscripts.length === 0) {
+      output += `\n## Legendas disponíveis (${tracks.length})\n\n`;
+      if (tracks.length === 0) {
         output += `Nenhuma legenda disponível para este vídeo.\n`;
       } else {
-        if (transcripts.manuallyCreated?.length > 0) {
-          output += `**Manuais (mais precisas):**\n`;
-          for (const t of transcripts.manuallyCreated) {
-            output += `  - ${t.language} (${t.languageCode})\n`;
+        const manual = tracks.filter(t => !t.vss_id?.startsWith("a.") && t.vss_id !== undefined);
+        const auto = tracks.filter(t => t.vss_id?.startsWith("a.") || t.vss_id === undefined);
+
+        if (manual.length > 0) {
+          output += `**Manuais:**\n`;
+          for (const t of manual) {
+            output += `  - ${t.name?.text || t.language_code} (\`${t.language_code}\`)\n`;
           }
         }
-        if (transcripts.generated?.length > 0) {
+        if (auto.length > 0) {
           output += `**Automáticas:**\n`;
-          for (const t of transcripts.generated) {
-            output += `  - ${t.language} (${t.languageCode})\n`;
+          for (const t of auto) {
+            output += `  - ${t.name?.text || t.language_code} (\`${t.language_code}\`)\n`;
           }
         }
       }
 
       return ok(output);
     } catch (e) {
-      // Fallback: tenta buscar transcrição padrão para checar se existe
-      try {
-        const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-        let output = `# Informações do vídeo\n\n`;
-        output += `**ID:** ${videoId}\n`;
-        output += `**URL:** https://www.youtube.com/watch?v=${videoId}\n\n`;
-        output += `**Legendas:** Disponíveis (idioma padrão do vídeo)\n`;
-        output += `**Segmentos:** ${transcript.length}\n`;
-        return ok(output);
-      } catch (e2) {
-        return err(
-          `Não foi possível obter informações do vídeo.\n` +
-          `- Verifique se o vídeo é público\n` +
-          `- Erro: ${e.message}`
-        );
-      }
+      return err(
+        `Não foi possível obter informações do vídeo.\n` +
+        `- Verifique se o vídeo é público\n` +
+        `- Erro: ${e.message}`
+      );
     }
   }
 );
@@ -251,7 +307,7 @@ server.tool(
 
 server.tool(
   "youtube_vision",
-  "Analisa um vídeo do YouTube usando Google Gemini Vision. Faz download do vídeo, envia para a API e retorna análise completa. Requer GEMINI_API_KEY e yt-dlp instalado.",
+  "Analisa um vídeo do YouTube usando Google Gemini Vision. Faz download do vídeo, envia para a API Gemini e retorna análise completa. Requer GEMINI_API_KEY e yt-dlp (via python3 -m yt_dlp ou yt-dlp CLI).",
   {
     url: z.string().describe("URL do vídeo do YouTube"),
     prompt: z.string().optional().default("Transcreva e descreva o conteúdo deste vídeo em detalhes").describe("O que analisar no vídeo"),
@@ -270,26 +326,21 @@ server.tool(
     const videoId = extractVideoId(url);
     if (!videoId) return err(`URL inválida: "${url}"`);
 
-    // Verificar se yt-dlp está instalado
-    try {
-      await execAsync("yt-dlp --version");
-    } catch {
+    const ytdlp = await checkYtdlp();
+    if (!ytdlp) {
       return err(
         "yt-dlp não está instalado.\n\n" +
-        "Instale com:\n" +
-        "```\nwinget install yt-dlp\n```\n" +
-        "ou baixe em: https://github.com/yt-dlp/yt-dlp/releases"
+        "Instale com:\n```\npython3 -m pip install yt-dlp\n```"
       );
     }
 
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const tmpPath = join(os.tmpdir(), `yt-${videoId}.mp4`);
+    const tmpPath = join(os.tmpdir(), `yt-video-${videoId}.mp4`);
 
     try {
-      // Download do vídeo em baixa qualidade
       process.stderr.write(`[youtube-mcp] Baixando vídeo ${videoId}...\n`);
       await execAsync(
-        `yt-dlp --format "worst[ext=mp4]/worst" -o "${tmpPath}" "${videoUrl}"`,
+        `${ytdlp} --format "worst[ext=mp4]/worst" -o "${tmpPath}" "${videoUrl}"`,
         { timeout: 120000 }
       );
 
@@ -297,7 +348,6 @@ server.tool(
         return err("Falha no download do vídeo. Arquivo não foi criado.");
       }
 
-      // Upload para Google File API e análise com Gemini
       process.stderr.write(`[youtube-mcp] Enviando para Gemini...\n`);
 
       let GoogleGenerativeAI, GoogleAIFileManager;
@@ -316,7 +366,6 @@ server.tool(
       const fileManager = new GoogleAIFileManager(GEMINI_API_KEY);
       const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-      // Upload do arquivo
       const uploadResult = await fileManager.uploadFile(tmpPath, {
         mimeType: "video/mp4",
         displayName: `YouTube video ${videoId}`,
@@ -325,7 +374,7 @@ server.tool(
       const fileUri = uploadResult.file.uri;
       const fileName = uploadResult.file.name;
 
-      // Aguarda processamento do arquivo
+      // Aguarda processamento
       let fileState = uploadResult.file.state;
       let attempts = 0;
       while (fileState === "PROCESSING" && attempts < 30) {
@@ -340,25 +389,18 @@ server.tool(
         return err(`Arquivo ficou no estado "${fileState}" após ${attempts * 5}s. Tente novamente.`);
       }
 
-      // Análise com Gemini
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
       const result = await model.generateContent([
-        {
-          fileData: {
-            mimeType: "video/mp4",
-            fileUri,
-          },
-        },
+        { fileData: { mimeType: "video/mp4", fileUri } },
         `${prompt}\n\nResponda em ${lang}.`,
       ]);
 
       const analysis = result.response.text();
-
-      // Limpeza
       await fileManager.deleteFile(fileName).catch(() => {});
 
       let output = `# Análise Gemini Vision\n\n`;
       output += `**Vídeo:** ${videoId}\n`;
+      output += `**URL:** https://www.youtube.com/watch?v=${videoId}\n`;
       output += `**Prompt:** ${prompt}\n`;
       output += `**Idioma:** ${lang}\n\n`;
       output += `---\n\n`;
@@ -368,7 +410,6 @@ server.tool(
     } catch (e) {
       return err(`Falha na análise: ${e.message}`);
     } finally {
-      // Limpar arquivo temporário
       if (existsSync(tmpPath)) {
         try { unlinkSync(tmpPath); } catch {}
       }
@@ -380,7 +421,7 @@ server.tool(
 
 server.tool(
   "youtube_whisper",
-  "Baixa o áudio de um vídeo e transcreve localmente com OpenAI Whisper. Funciona mesmo sem legendas. Requer yt-dlp e whisper (pip) instalados.",
+  "Baixa o áudio de um vídeo do YouTube e transcreve localmente com OpenAI Whisper. Funciona mesmo sem legendas. Requer yt-dlp e whisper (pip install openai-whisper) instalados.",
   {
     url: z.string().describe("URL do vídeo do YouTube"),
     lang: z.string().optional().default("pt").describe("Idioma do áudio para o Whisper (padrão: pt)"),
@@ -390,40 +431,39 @@ server.tool(
     const videoId = extractVideoId(url);
     if (!videoId) return err(`URL inválida: "${url}"`);
 
-    // Verificar yt-dlp
-    try {
-      await execAsync("yt-dlp --version");
-    } catch {
+    const ytdlp = await checkYtdlp();
+    if (!ytdlp) {
       return err(
         "yt-dlp não está instalado.\n\n" +
-        "Instale com:\n```\nwinget install yt-dlp\n```\n" +
-        "ou baixe em: https://github.com/yt-dlp/yt-dlp/releases"
+        "Instale com:\n```\npython3 -m pip install yt-dlp\n```"
       );
     }
 
     // Verificar whisper
     try {
-      await execAsync("whisper --help");
+      await execAsync("python3 -m whisper --help", { timeout: 5000 });
     } catch {
-      return err(
-        "Whisper não está instalado.\n\n" +
-        "Instale com:\n```\npip install openai-whisper\n```\n" +
-        "Requisito: Python 3.8+ e FFmpeg instalados.\n" +
-        "FFmpeg: winget install ffmpeg"
-      );
+      try {
+        await execAsync("whisper --help", { timeout: 5000 });
+      } catch {
+        return err(
+          "Whisper não está instalado.\n\n" +
+          "Instale com:\n```\npython3 -m pip install openai-whisper\n```\n" +
+          "Requisito: FFmpeg instalado.\n" +
+          "FFmpeg: winget install ffmpeg"
+        );
+      }
     }
 
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const tmpDir = os.tmpdir();
     const audioPath = join(tmpDir, `yt-audio-${videoId}.mp3`);
-    const whisperOutputBase = join(tmpDir, `yt-audio-${videoId}`);
-    const whisperTxtPath = `${whisperOutputBase}.txt`;
+    const whisperTxtPath = join(tmpDir, `yt-audio-${videoId}.txt`);
 
     try {
-      // Download apenas do áudio
       process.stderr.write(`[youtube-mcp] Baixando áudio ${videoId}...\n`);
       await execAsync(
-        `yt-dlp --extract-audio --audio-format mp3 -o "${audioPath}" "${videoUrl}"`,
+        `${ytdlp} --extract-audio --audio-format mp3 -o "${audioPath}" "${videoUrl}"`,
         { timeout: 120000 }
       );
 
@@ -431,23 +471,27 @@ server.tool(
         return err("Falha no download do áudio. Arquivo não foi criado.");
       }
 
-      // Transcrição com Whisper
       process.stderr.write(`[youtube-mcp] Transcrevendo com Whisper (model: ${model})...\n`);
-      await execAsync(
-        `whisper "${audioPath}" --language ${lang} --model ${model} --output_format txt --output_dir "${tmpDir}"`,
-        { timeout: 600000 } // 10 min timeout para modelos grandes
-      );
+
+      // Tentar python3 -m whisper primeiro, depois whisper direto
+      let whisperCmd = `python3 -m whisper "${audioPath}" --language ${lang} --model ${model} --output_format txt --output_dir "${tmpDir}"`;
+      try {
+        await execAsync(whisperCmd, { timeout: 600000 });
+      } catch {
+        whisperCmd = `whisper "${audioPath}" --language ${lang} --model ${model} --output_format txt --output_dir "${tmpDir}"`;
+        await execAsync(whisperCmd, { timeout: 600000 });
+      }
 
       if (!existsSync(whisperTxtPath)) {
         return err("Whisper não gerou o arquivo de saída esperado.");
       }
 
       const transcription = readFileSync(whisperTxtPath, "utf-8").trim();
-
-      const wordCount = transcription.split(/\s+/).length;
+      const wordCount = transcription.split(/\s+/).filter(Boolean).length;
 
       let output = `# Transcrição Whisper\n\n`;
       output += `**Vídeo:** ${videoId}\n`;
+      output += `**URL:** https://www.youtube.com/watch?v=${videoId}\n`;
       output += `**Modelo:** ${model}\n`;
       output += `**Idioma:** ${lang}\n`;
       output += `**Palavras:** ~${wordCount}\n\n`;
@@ -458,7 +502,6 @@ server.tool(
     } catch (e) {
       return err(`Falha na transcrição: ${e.message}`);
     } finally {
-      // Limpar arquivos temporários
       for (const f of [audioPath, whisperTxtPath]) {
         if (existsSync(f)) {
           try { unlinkSync(f); } catch {}
