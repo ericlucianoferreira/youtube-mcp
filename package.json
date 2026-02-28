@@ -4,6 +4,9 @@
   "description": "MCP server for YouTube transcript and analysis - Expert Integrado",
   "type": "module",
   "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js"
   },
