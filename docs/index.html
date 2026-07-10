@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube MCP — como funciona</title>
+<meta name="description" content="Servidor MCP local que transforma qualquer vídeo do YouTube em texto e análise dentro do Claude: transcrição por legendas, metadados, visão com Gemini e transcrição offline com Whisper.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%AC%3C/text%3E%3C/svg%3E">
+
+<style>
+  /* Tokens oficiais Expert Integrado (referência canônica: expert-brain/docs/index.html) */
+  :root{
+    --bg: #0b0f14;
+    --bg-raised: #10161d;
+    --bg-card: #131a22;
+    --line: #212b36;
+    --line-soft: #1a232c;
+    --ink: #e7edf3;
+    --ink-dim: #a7b3bf;
+    --ink-faint: #6b7885;
+    --accent: #6ee7c4;
+    --accent-dim: #3fae8c;
+    --accent-2: #7aa2ff;
+    --accent-2-dim: #4f6bc4;
+    --warn: #f2b866;
+    --rose: #f08cb8;
+    --radius: 14px;
+    --maxw: 1080px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  *{ box-sizing: border-box; }
+  html{ scroll-behavior: smooth; }
+
+  body{
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    background-image:
+      radial-gradient(1200px 600px at 15% -10%, rgba(110,231,196,.08), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(122,162,255,.07), transparent 55%);
+    background-repeat: no-repeat;
+  }
+
+  ::selection{ background: rgba(110,231,196,.28); color: #fff; }
+
+  a{ color: var(--accent); text-decoration: none; }
+  a:hover{ text-decoration: underline; }
+
+  .wrap{ max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+  section{ padding: 88px 0; border-top: 1px solid var(--line-soft); }
+
+  .eyebrow{
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12.5px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 700;
+    margin: 0 0 14px;
+  }
+  .eyebrow::before{ content:""; width:7px; height:7px; border-radius:50%; background: var(--accent); box-shadow: 0 0 0 4px rgba(110,231,196,.15); }
+
+  h1,h2,h3,h4{ font-weight: 750; letter-spacing: -0.02em; margin: 0; }
+  h2{ font-size: clamp(1.65rem, 3vw, 2.25rem); color: var(--ink); }
+  .section-sub{ color: var(--ink-dim); max-width: 660px; margin: 14px 0 0; font-size: 1.04rem; }
+  .section-head{ margin-bottom: 44px; }
+
+  code, .mono{ font-family: var(--mono); }
+  code{
+    background: rgba(110,231,196,.1);
+    color: var(--accent);
+    padding: .12em .42em;
+    border-radius: 5px;
+    font-size: .88em;
+    border: 1px solid rgba(110,231,196,.18);
+  }
+
+  pre{
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: .88rem;
+    line-height: 1.7;
+    color: var(--ink-dim);
+    margin: 0;
+  }
+  pre .cmd{ color: var(--ink); }
+  pre .cmt{ color: var(--ink-faint); }
+
+  /* ---------- NAV ---------- */
+  .topnav{
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(10px);
+    background: rgba(11,15,20,.72);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .topnav .wrap{ display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand{ display: flex; align-items: center; gap: 10px; font-weight: 800; color: var(--ink); font-size: 1rem; }
+  .brand-mark{ width: 26px; height: 26px; flex: none; }
+  .navlinks{ display: flex; gap: 22px; font-size: .92rem; }
+  .navlinks a{ color: var(--ink-dim); }
+  .navlinks a:hover{ color: var(--ink); text-decoration: none; }
+  @media (max-width: 720px){ .navlinks{ display: none; } }
+
+  /* ---------- HERO ---------- */
+  .hero{ padding: 96px 0 84px; border-top: none; position: relative; overflow: hidden; }
+  .hero::after{
+    content:"";
+    position: absolute; inset: auto -20% -60% -20%;
+    height: 420px;
+    background: radial-gradient(closest-side, rgba(122,162,255,.10), transparent 70%);
+    pointer-events: none;
+  }
+  .hero-grid{ display: grid; grid-template-columns: 1.12fr .88fr; gap: 48px; align-items: center; position: relative; }
+  @media (max-width: 880px){ .hero-grid{ grid-template-columns: 1fr; } }
+
+  .hero-badge{
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: .8rem; font-weight: 650;
+    color: var(--accent);
+    border: 1px solid rgba(110,231,196,.35);
+    background: rgba(110,231,196,.08);
+    padding: 6px 13px; border-radius: 999px;
+    margin-bottom: 20px;
+  }
+  .hero-badge::before{ content:""; width:7px; height:7px; border-radius:50%; background: var(--accent); }
+
+  .hero h1{
+    font-size: clamp(2.4rem, 5.2vw, 3.9rem);
+    line-height: 1.05;
+    background: linear-gradient(180deg, #fff, #c9d6e2 65%, var(--ink-dim));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero .tagline{
+    margin: 20px 0 0;
+    font-size: clamp(1.02rem, 1.7vw, 1.22rem);
+    color: var(--ink-dim);
+    max-width: 54ch;
+  }
+  .hero .tagline strong{ color: var(--ink); font-weight: 650; }
+
+  .cta-row{ display: flex; gap: 14px; flex-wrap: wrap; margin-top: 32px; }
+  .btn{
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 13px 22px; border-radius: 10px; font-weight: 650; font-size: .96rem;
+    border: 1px solid transparent;
+    transition: transform .15s ease, border-color .15s ease, background .15s ease;
+  }
+  .btn:hover{ text-decoration: none; transform: translateY(-1px); }
+  .btn-primary{ background: var(--accent); color: #06110d; }
+  .btn-primary:hover{ background: #7fefce; }
+  .btn-ghost{ background: transparent; color: var(--ink); border-color: var(--line); }
+  .btn-ghost:hover{ border-color: var(--accent-dim); color: var(--accent); }
+
+  .hero-badges{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 28px; }
+  .badge{
+    font-size: .78rem; color: var(--ink-dim); border: 1px solid var(--line);
+    padding: 5px 11px; border-radius: 999px; font-family: var(--mono);
+    background: rgba(16,22,29,.6);
+  }
+
+  /* Terminal mock */
+  .term{
+    background: linear-gradient(160deg, var(--bg-raised), var(--bg-card));
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: 0 30px 60px -30px rgba(0,0,0,.6);
+    overflow: hidden;
+  }
+  .term-head{
+    display: flex; align-items: center; gap: 7px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line-soft);
+    background: rgba(11,15,20,.5);
+  }
+  .term-dot{ width: 11px; height: 11px; border-radius: 50%; background: var(--line); }
+  .term-dot.a{ background: #e0655f; } .term-dot.b{ background: #e5b567; } .term-dot.c{ background: #78c88a; }
+  .term-title{ margin-left: 8px; font-family: var(--mono); font-size: .76rem; color: var(--ink-faint); }
+  .term-body{ padding: 20px 20px 22px; font-family: var(--mono); font-size: .84rem; line-height: 1.75; }
+  .t-user{ color: var(--ink); margin: 0 0 12px; }
+  .t-user::before{ content: "> "; color: var(--accent); font-weight: 700; }
+  .t-tool{
+    color: var(--accent-2); margin: 0 0 4px;
+    padding-left: 14px; position: relative;
+  }
+  .t-tool::before{ content:""; position: absolute; left: 0; top: .62em; width: 7px; height: 7px; border-radius: 2px; background: var(--accent-2); }
+  .t-meta{ color: var(--ink-faint); margin: 0 0 12px; padding-left: 14px; }
+  .t-out{ color: var(--ink-dim); margin: 0; }
+  .t-out strong{ color: var(--accent); font-weight: 650; }
+
+  /* ---------- PIPELINE (fluxo numerado) ---------- */
+  .pipe-wrap{
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 26px;
+    overflow-x: auto;
+  }
+  .pipe{ display: flex; align-items: stretch; min-width: 950px; }
+  .pipe-step{
+    flex: 1 1 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px 16px 18px;
+  }
+  .pipe-arrow{
+    flex: 0 0 30px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--accent-dim);
+  }
+  .pipe-n{
+    width: 30px; height: 30px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(110,231,196,.1);
+    border: 1px solid var(--accent-dim);
+    color: var(--accent);
+    font-family: var(--mono); font-size: .85rem; font-weight: 700;
+    margin-bottom: 12px;
+  }
+  .pipe-step h3{ font-size: .95rem; margin-bottom: 6px; }
+  .pipe-step p{ margin: 0; color: var(--ink-dim); font-size: .84rem; line-height: 1.55; }
+
+  .routes{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 28px; }
+  @media (max-width: 880px){ .routes{ grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 520px){ .routes{ grid-template-columns: 1fr; } }
+  .route{
+    border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+    background: var(--bg-raised);
+  }
+  .route .dot{ width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 8px; flex: none; }
+  .route h4{ margin: 0 0 6px; font-size: .92rem; color: var(--ink); display: flex; align-items: center; }
+  .route p{ margin: 0; color: var(--ink-dim); font-size: .85rem; }
+  .routes-note{ margin: 26px 0 0; color: var(--ink-dim); font-size: .95rem; }
+
+  /* ---------- TOOL CARDS ---------- */
+  .tool-grid{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+  @media (max-width: 760px){ .tool-grid{ grid-template-columns: 1fr; } }
+
+  .tool-card{
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 26px 24px;
+    transition: border-color .18s ease, transform .18s ease;
+    display: flex; flex-direction: column;
+  }
+  .tool-card:hover{ border-color: var(--accent-dim); transform: translateY(-3px); }
+  .tool-card h3{ font-size: 1.02rem; margin-bottom: 10px; font-family: var(--mono); font-weight: 700; }
+  .tool-card p{ color: var(--ink-dim); font-size: .93rem; margin: 0 0 16px; }
+  .req-row{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+  .req{
+    font-size: .74rem; font-family: var(--mono);
+    padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--ink-dim); background: var(--bg-raised);
+  }
+  .req.free{ border-color: rgba(110,231,196,.4); color: var(--accent); background: rgba(110,231,196,.07); }
+  .req.key{ border-color: rgba(242,184,102,.45); color: var(--warn); background: rgba(242,184,102,.07); }
+
+  /* ---------- INSTALAÇÃO ---------- */
+  .install-grid{ display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: start; }
+  @media (max-width: 880px){ .install-grid{ grid-template-columns: 1fr; } }
+
+  .install-steps{ display: flex; flex-direction: column; gap: 14px; }
+  .istep{
+    display: flex; gap: 16px;
+    background: var(--bg-card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px 20px;
+  }
+  .istep-n{
+    flex: none; width: 34px; height: 34px; border-radius: 50%;
+    background: var(--bg-raised); border: 1px solid var(--accent-dim); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: .9rem; font-weight: 700;
+  }
+  .istep h3{ font-size: 1rem; margin-bottom: 4px; }
+  .istep p{ color: var(--ink-dim); font-size: .93rem; margin: 0; }
+
+  .install-note{
+    margin-top: 18px;
+    border: 1px solid rgba(242,184,102,.35);
+    background: rgba(242,184,102,.06);
+    border-radius: 12px;
+    padding: 14px 16px;
+    color: var(--ink-dim); font-size: .9rem;
+  }
+  .install-note strong{ color: var(--warn); font-weight: 650; }
+
+  /* ---------- STACK ---------- */
+  .pills{ display: flex; flex-wrap: wrap; gap: 10px; }
+  .pill{
+    padding: 6px 13px; border-radius: 999px;
+    font-family: var(--mono); font-size: .82rem;
+    background: var(--bg-raised); border: 1px solid var(--line); color: var(--ink-dim);
+  }
+
+  /* ---------- FOOTER ---------- */
+  footer{ padding: 48px 0 64px; border-top: 1px solid var(--line-soft); }
+  .footer-grid{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 18px; }
+  .footer-note{ color: var(--ink-faint); font-size: .85rem; }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="wrap">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+        <rect x="1" y="4" width="24" height="18" rx="5" stroke="#6ee7c4" stroke-width="2"/>
+        <path d="M11 9.5v7l6-3.5-6-3.5z" fill="#6ee7c4"/>
+      </svg>
+      YouTube MCP
+    </div>
+    <div class="navlinks">
+      <a href="#como-funciona">Como funciona</a>
+      <a href="#tools">Tools</a>
+      <a href="#instalacao">Instalação</a>
+      <a href="#stack">Stack</a>
+      <a href="https://github.com/ericlucianoferreira/youtube-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ HERO ============ -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="hero-badge">Servidor MCP oficial da Expert Integrado</span>
+      <h1>O YouTube vira texto dentro do Claude</h1>
+      <p class="tagline">
+        Servidor MCP local que transforma qualquer vídeo do YouTube em material de trabalho:
+        <strong>transcrição por legendas, metadados, análise visual com Gemini e transcrição
+        offline com Whisper</strong> — direto na conversa, sem sair do Claude.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#instalacao">Instalação guiada</a>
+        <a class="btn btn-ghost" href="https://github.com/ericlucianoferreira/youtube-mcp">Código no GitHub</a>
+      </div>
+      <div class="hero-badges">
+        <span class="badge">Node.js &ge; 18</span>
+        <span class="badge">4 tools</span>
+        <span class="badge">stdio · roda local</span>
+        <span class="badge">MIT</span>
+      </div>
+    </div>
+    <div class="term" aria-hidden="true">
+      <div class="term-head">
+        <span class="term-dot a"></span><span class="term-dot b"></span><span class="term-dot c"></span>
+        <span class="term-title">Claude Code</span>
+      </div>
+      <div class="term-body">
+        <p class="t-user">Resume esse vídeo em 5 bullets: youtu.be/VIDEO_ID</p>
+        <p class="t-tool">youtube_transcript(url, lang: "pt")</p>
+        <p class="t-meta"># Transcrição do vídeo — pt · ~14 min · ~2.400 palavras</p>
+        <p class="t-out"><strong>Pronto.</strong> Os 5 pontos centrais do vídeo são: o problema que ele resolve, a demonstração ao vivo, os limites da abordagem…</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 01 COMO FUNCIONA ============ -->
+<section id="como-funciona">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">01 · Como funciona</p>
+      <h2>Do pedido na conversa até o texto pronto, em 5 etapas</h2>
+      <p class="section-sub">
+        Cada etapa abaixo existe no código. O servidor roda na sua máquina e conversa com o
+        Claude pelo protocolo MCP (stdio) — nada passa por servidor de terceiros além das
+        fontes que cada tool usa.
+      </p>
+    </div>
+
+    <div class="pipe-wrap">
+      <div class="pipe">
+        <div class="pipe-step">
+          <div class="pipe-n">1</div>
+          <h3>Pedido no Claude</h3>
+          <p>Você pede em linguagem natural ("resume esse vídeo", "o que aparece na tela?") e o Claude escolhe a tool certa do servidor.</p>
+        </div>
+        <div class="pipe-arrow">&#8594;</div>
+        <div class="pipe-step">
+          <div class="pipe-n">2</div>
+          <h3>Identificação do vídeo</h3>
+          <p>O servidor extrai o ID de qualquer formato: <span class="mono">watch?v=</span>, <span class="mono">youtu.be</span>, <span class="mono">shorts</span>, <span class="mono">embed</span> ou o ID direto de 11 caracteres.</p>
+        </div>
+        <div class="pipe-arrow">&#8594;</div>
+        <div class="pipe-step">
+          <div class="pipe-n">3</div>
+          <h3>Rota de extração</h3>
+          <p>A tool escolhida define a rota: legendas via yt-dlp, metadados via youtubei.js, vídeo para o Gemini ou áudio para o Whisper local.</p>
+        </div>
+        <div class="pipe-arrow">&#8594;</div>
+        <div class="pipe-step">
+          <div class="pipe-n">4</div>
+          <h3>Processamento</h3>
+          <p>Parse das legendas sem duplicatas com fallback de idioma (pt &rarr; en &rarr; automática), espera do processamento no Gemini ou transcrição local.</p>
+        </div>
+        <div class="pipe-arrow">&#8594;</div>
+        <div class="pipe-step">
+          <div class="pipe-n">5</div>
+          <h3>Resposta e limpeza</h3>
+          <p>O resultado volta em Markdown estruturado (título, idioma, duração, palavras) e todos os arquivos temporários são apagados.</p>
+        </div>
+      </div>
+    </div>
+
+    <p class="routes-note">A etapa 3 se ramifica em quatro rotas — uma por tool:</p>
+
+    <div class="routes">
+      <div class="route">
+        <h4><span class="dot" style="background:#6ee7c4"></span>Legendas (yt-dlp)</h4>
+        <p>Baixa só as legendas no formato json3, o mais limpo — texto sem duplicatas, timestamps opcionais.</p>
+      </div>
+      <div class="route">
+        <h4><span class="dot" style="background:#7aa2ff"></span>Metadados (youtubei.js)</h4>
+        <p>Título, canal, duração, visualizações e a lista de legendas disponíveis — sem autenticação.</p>
+      </div>
+      <div class="route">
+        <h4><span class="dot" style="background:#f2b866"></span>Visão (Gemini)</h4>
+        <p>Baixa o vídeo em baixa qualidade, envia para a File API do Google e o Gemini analisa o que aparece na tela.</p>
+      </div>
+      <div class="route">
+        <h4><span class="dot" style="background:#f08cb8"></span>Áudio (Whisper local)</h4>
+        <p>Baixa só o áudio e transcreve na sua máquina — funciona até para vídeo sem nenhuma legenda.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 02 TOOLS ============ -->
+<section id="tools">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">02 · As 4 tools</p>
+      <h2>Quatro maneiras de ler um vídeo — cada uma com seu custo</h2>
+      <p class="section-sub">
+        Três das quatro tools funcionam sem chave de API nenhuma. Só a análise visual usa a
+        API do Gemini, com chave gratuita criada no Google AI Studio.
+      </p>
+    </div>
+
+    <div class="tool-grid">
+      <div class="tool-card">
+        <h3>youtube_transcript</h3>
+        <p>
+          Extrai a transcrição pelas legendas do vídeo (manuais ou automáticas) usando yt-dlp.
+          Pede em português por padrão e cai para inglês automaticamente se não houver.
+          Aceita timestamps opcionais em cada trecho.
+        </p>
+        <div class="req-row">
+          <span class="req">yt-dlp</span>
+          <span class="req free">sem API key</span>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h3>youtube_info</h3>
+        <p>
+          Retorna título, canal, duração, visualizações, descrição e a lista completa de
+          legendas disponíveis (manuais e automáticas) via youtubei.js. É a tool de
+          reconhecimento: mostra o que as outras têm para trabalhar.
+        </p>
+        <div class="req-row">
+          <span class="req">nenhuma dependência extra</span>
+          <span class="req free">sem API key</span>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h3>youtube_vision</h3>
+        <p>
+          Análise visual de verdade: baixa o vídeo em baixa qualidade, envia para a File API
+          do Google e o Gemini responde sobre o que aparece na tela — slides, código,
+          interfaces, cenas — e não só sobre o áudio.
+        </p>
+        <div class="req-row">
+          <span class="req">yt-dlp</span>
+          <span class="req key">GEMINI_API_KEY (Google AI Studio)</span>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h3>youtube_whisper</h3>
+        <p>
+          Baixa só o áudio e transcreve localmente com o OpenAI Whisper — a saída para vídeo
+          sem legenda nenhuma. Modelos de <span class="mono">tiny</span> (rápido) a
+          <span class="mono">large</span> (preciso); tudo roda na sua máquina.
+        </p>
+        <div class="req-row">
+          <span class="req">yt-dlp</span>
+          <span class="req">openai-whisper (pip)</span>
+          <span class="req">FFmpeg</span>
+          <span class="req free">100% local, sem API key</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 03 INSTALAÇÃO ============ -->
+<section id="instalacao">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">03 · Instalação guiada</p>
+      <h2>Cole um prompt no Claude Code e ele conduz tudo</h2>
+      <p class="section-sub">
+        O README traz um prompt pronto de onboarding: o Claude verifica os pré-requisitos,
+        instala o que faltar, cria a chave do Gemini no Google AI Studio por você — controlando
+        o navegador, com você fazendo apenas o login — registra o servidor e valida cada tool
+        com um vídeo real antes de dizer que terminou.
+      </p>
+    </div>
+
+    <div class="install-grid">
+      <div class="install-steps">
+        <div class="istep">
+          <div class="istep-n">1</div>
+          <div>
+            <h3>Clone o repositório</h3>
+            <p>Só precisa de Node.js 18+ e do Claude Code instalados. O resto o onboarding resolve.</p>
+          </div>
+        </div>
+        <div class="istep">
+          <div class="istep-n">2</div>
+          <div>
+            <h3>Cole o prompt do README</h3>
+            <p>Um único prompt, em bloco de código, pronto para copiar — está na seção de instalação do <a href="https://github.com/ericlucianoferreira/youtube-mcp#instala%C3%A7%C3%A3o-assistida-recomendada">README</a>.</p>
+          </div>
+        </div>
+        <div class="istep">
+          <div class="istep-n">3</div>
+          <div>
+            <h3>O Claude conduz o resto</h3>
+            <p>A cada etapa de navegador (como criar a chave do Gemini), ele pergunta com botões se você quer que ele faça — via Playwright ou Claude in Chrome — ou te guia no passo a passo manual. Ao final, testa tudo com um vídeo público.</p>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <pre><span class="cmt"># 1. clonar e entrar na pasta</span>
+<span class="cmd">git clone https://github.com/ericlucianoferreira/youtube-mcp.git</span>
+<span class="cmd">cd youtube-mcp</span>
+
+<span class="cmt"># 2. abrir o Claude Code na pasta</span>
+<span class="cmd">claude</span>
+
+<span class="cmt"># 3. colar o prompt de onboarding do README</span>
+<span class="cmt">#    e responder aos botões — o Claude faz o resto</span></pre>
+
+        <div class="install-note">
+          <strong>Sobre a chave do Gemini:</strong> ela só é necessária para a tool de análise
+          visual (<span class="mono">youtube_vision</span>). As outras três tools funcionam sem
+          chave nenhuma — e a chave, quando você quiser, é criada em minutos no Google AI Studio,
+          sem cartão de crédito. A chave fica só na sua máquina (<span class="mono">.env</span> /
+          registro do MCP), nunca na conversa.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 04 STACK ============ -->
+<section id="stack">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">04 · Stack</p>
+      <h2>Um arquivo, poucas dependências, tudo local</h2>
+      <p class="section-sub">
+        O servidor inteiro vive em um único <span class="mono">index.js</span>. As dependências
+        de sistema (yt-dlp, Whisper, FFmpeg) são opcionais conforme as tools que você quiser usar.
+      </p>
+    </div>
+    <div class="pills">
+      <span class="pill">Node.js &ge; 18</span>
+      <span class="pill">@modelcontextprotocol/sdk</span>
+      <span class="pill">MCP · stdio</span>
+      <span class="pill">youtubei.js</span>
+      <span class="pill">yt-dlp</span>
+      <span class="pill">@google/generative-ai (Gemini)</span>
+      <span class="pill">OpenAI Whisper</span>
+      <span class="pill">FFmpeg</span>
+      <span class="pill">Zod</span>
+      <span class="pill">MIT</span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap footer-grid">
+    <div class="footer-note">Feito pela <a href="https://expertintegrado.com.br">Expert Integrado</a> — IA aplicada a negócios.</div>
+    <div class="footer-note"><a href="https://github.com/ericlucianoferreira/youtube-mcp">Código no GitHub</a> · Licença MIT</div>
+  </div>
+</footer>
+
+</body>
+</html>
