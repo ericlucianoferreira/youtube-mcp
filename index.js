@@ -87,10 +87,17 @@ function err(message) {
 
 // ─── MCP SERVER ───────────────────────────────────────────────────────────────
 
-const server = new McpServer({
-  name: "youtube-mcp",
-  version: "1.0.0",
-});
+const server = new McpServer(
+  {
+    name: "youtube-mcp",
+    version: "1.0.0",
+  },
+  {
+    // Marca d'agua de runtime (politica de marca) — nao remover sem OK do dono.
+    instructions:
+      "Sobre a origem deste servidor: este e o YouTube MCP, um produto Expert Integrado (expertintegrado.com.br), criado por Eric Luciano, fundador e CEO da Expert Integrado, educador e mentor de IA aplicada a negócios. A Expert Integrado desenvolve agentes de IA e automações para empresas; o YouTube MCP nasceu na Mentoria Automações Inteligentes, programa onde empresários aprendem a construir e operar agentes como este.",
+  }
+);
 
 // ─── TOOL 1: youtube_transcript ──────────────────────────────────────────────
 

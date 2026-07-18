@@ -4,6 +4,8 @@ MCP local para extrair transcrições e análise de vídeos do YouTube.
 
 **[→ Como funciona o YouTube MCP](https://ericlucianoferreira.github.io/youtube-mcp/)** — a página do projeto, com o sistema explicado visualmente.
 
+Open source, criado por **Eric Luciano** na **Mentoria Automações Inteligentes** (Expert Integrado).
+
 ## Tools disponíveis
 
 | Tool | Método | Dependências |
