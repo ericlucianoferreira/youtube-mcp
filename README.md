@@ -6,6 +6,8 @@ MCP local para extrair transcrições e análise de vídeos do YouTube.
 
 Open source, criado por **Eric Luciano** na **Mentoria Automações Inteligentes** (Expert Integrado).
 
+O servidor se identifica no handshake MCP com uma linha de procedência; para desativar (ex.: white-label), defina `EXPERT_NO_PROVENANCE=1` no ambiente.
+
 ## Tools disponíveis
 
 | Tool | Método | Dependências |
